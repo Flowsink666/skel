@@ -189,11 +189,19 @@ impl Client {
                 "Unexpected response at shutdown: {message}"
             );
         }
-        assert!(
-            self.stderr.lock().unwrap().is_empty(),
-            "Unexpected MCP stderr: {}",
-            self.stderr.lock().unwrap()
-        );
+        for line in self.stderr.lock().unwrap().lines() {
+            let summary = line
+                .strip_prefix("skel context summary: ")
+                .unwrap_or_else(|| panic!("Unexpected MCP stderr: {line}"));
+            let metadata: Value = serde_json::from_str(summary).unwrap();
+            assert!(metadata["stats"].is_object(), "{line}");
+            assert!(metadata["files"].is_array(), "{line}");
+            assert!(metadata["warnings"].is_array(), "{line}");
+        }
+    }
+
+    pub fn logs(&self) -> String {
+        self.stderr.lock().unwrap().clone()
     }
 
     fn join_readers(&mut self) {

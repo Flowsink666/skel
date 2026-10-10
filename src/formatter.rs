@@ -22,8 +22,8 @@ fn format_code_span(text: &str) -> String {
     format!("{delimiter}{text}{delimiter}")
 }
 
-/// Format results into a clean, LLM-optimized Markdown document.
-pub fn format_markdown(results: &[FileResult], stats: &RepoStats) -> String {
+/// Format repository metadata and the file index for logging.
+pub fn format_context_summary(results: &[FileResult], stats: &RepoStats) -> String {
     let mut lines = Vec::new();
 
     lines.push("# Codebase Context".to_string());
@@ -48,6 +48,14 @@ pub fn format_markdown(results: &[FileResult], stats: &RepoStats) -> String {
     }
 
     lines.push("\n---\n".to_string());
+
+    lines.join("\n")
+}
+
+/// Format per-file source sections without repository metadata.
+/// The statistics argument is retained for compatibility with library callers.
+pub fn format_markdown(results: &[FileResult], _stats: &RepoStats) -> String {
+    let mut lines = Vec::new();
 
     for r in results {
         let file_path = format_code_span(&r.path);

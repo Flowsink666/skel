@@ -10,7 +10,7 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler, ServiceExt}
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::walker::{discover_files_with_limit, Discovery};
+use crate::walker::{discover_files_with_filters, Discovery};
 use crate::{compute_stats, estimate_tokens, format_markdown, skeletonize};
 use crate::{FileResult, RepoStats};
 
@@ -32,6 +32,9 @@ pub struct ContextParams {
     /// Globs relative to the selected path; matching files keep their full source.
     #[serde(default)]
     pub focus: Vec<String>,
+    /// Globs relative to the selected path; exclude matching files unless focused.
+    #[serde(default)]
+    pub exclude: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -70,8 +73,9 @@ impl SkelServer {
 
     fn discover(&self, params: &ContextParams) -> Result<Discovery, String> {
         let selected = self.resolve(Path::new(&params.path))?;
-        let mut discovery = discover_files_with_limit(&selected, &params.focus, MAX_FILES)
-            .map_err(|err| err.to_string())?;
+        let mut discovery =
+            discover_files_with_filters(&selected, &params.focus, &params.exclude, MAX_FILES)
+                .map_err(|err| err.to_string())?;
         if discovery.files.is_empty() && !discovery.warnings.is_empty() {
             return Err(discovery.warnings.join("\n"));
         }
@@ -91,7 +95,14 @@ impl SkelServer {
             Ok(Ok(result)) => {
                 let size = serde_json::to_vec(&result).map(|v| v.len());
                 match size {
-                    Ok(bytes) if bytes <= MAX_RESPONSE_BYTES => result,
+                    Ok(bytes) if bytes <= MAX_RESPONSE_BYTES => {
+                        if matches!(operation, Operation::Context) {
+                            if let Some(metadata) = &result.structured_content {
+                                eprintln!("skel context summary: {metadata}");
+                            }
+                        }
+                        result
+                    }
                     Ok(_) => tool_error("Response exceeds 2 MiB. Select a smaller directory."),
                     Err(err) => tool_error(format!("Cannot serialize result: {err}")),
                 }
@@ -108,6 +119,7 @@ impl SkelServer {
     ) -> Result<CallToolResult, String> {
         let Discovery {
             files,
+            excluded,
             mut warnings,
         } = self.discover(&params)?;
         if matches!(operation, Operation::List) {
@@ -123,6 +135,7 @@ impl SkelServer {
                 .collect();
             return Ok(CallToolResult::structured(json!({
                 "file_count": entries.len(), "files": entries, "warnings": warnings,
+                "excluded_count": excluded.len(), "excluded_files": excluded,
             })));
         }
 
@@ -206,6 +219,8 @@ impl SkelServer {
             "stats": stats_json(&stats),
             "files": entries,
             "warnings": warnings,
+            "excluded_count": excluded.len(),
+            "excluded_files": excluded,
         });
         let markdown = format_markdown(&results, &stats);
         metadata["markdown_estimated_tokens"] = json!(estimate_tokens(&markdown));
@@ -218,7 +233,7 @@ impl SkelServer {
 #[tool_router]
 impl SkelServer {
     #[tool(
-        description = "List supported source files under the server root without reading their contents. Paths and focus globs are relative to the selected path.",
+        description = "List supported source files under the server root without reading their contents. Focus and exclude globs are relative to the selected path. Focus overrides exclude; excluded paths and matching patterns are reported separately.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -234,7 +249,7 @@ impl SkelServer {
     }
 
     #[tool(
-        description = "Generate Markdown code skeletons for a file or directory under the server root. Focus globs keep matching files in full. Python/TS/JS use AST; other supported languages use lexical pruning. UNCHANGED means no pruning occurred, including on parse failure. Token counts are estimates.",
+        description = "Generate Markdown code skeletons for a file or directory under the server root. Focus globs keep matching files in full and override exclude globs. Excluded paths and matching patterns appear in metadata only. Python/TS/JS use AST; other supported languages use lexical pruning. UNCHANGED means no pruning occurred, including on parse failure. Token counts are estimates.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -252,7 +267,7 @@ impl SkelServer {
 
 #[tool_handler(
     name = "skel",
-    instructions = "Read-only code context tools scoped to the startup directory. Use skel_list_files to inspect paths and skel_skeletonize to get context with compression estimates. Focus globs are relative to the selected path. UNCHANGED files may contain only declarations or have parse errors. Existing CLI ignore rules apply; .gitignore is not read."
+    instructions = "Read-only code context tools scoped to the startup directory. Use skel_list_files to inspect paths and skel_skeletonize to get context with compression estimates. Focus and exclude globs are relative to the selected path (basename for a single file); focus overrides exclude. Existing CLI ignore rules apply before these globs; .gitignore is not read. Scan limits include excluded files. UNCHANGED files may contain only declarations or have parse errors."
 )]
 impl ServerHandler for SkelServer {}
 

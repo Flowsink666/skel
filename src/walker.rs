@@ -88,12 +88,38 @@ pub fn discover_files(
 #[derive(Debug)]
 pub struct Discovery {
     pub files: Vec<DiscoveredFile>,
+    pub excluded: Vec<ExcludedFile>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct ExcludedFile {
+    #[serde(rename = "path")]
+    pub relative_path: String,
+    /// First matching exclude pattern, as supplied by the caller.
+    pub pattern: String,
+}
+
+struct FileSelection<'a> {
+    focus: Option<GlobSet>,
+    exclude: Option<GlobSet>,
+    exclude_patterns: &'a [String],
+}
+
+impl<'a> FileSelection<'a> {
+    fn new(focus: &[String], exclude: &'a [String]) -> Result<Self, DiscoveryError> {
+        Ok(Self {
+            focus: build_focus_globset(focus).map_err(DiscoveryError::InvalidFocus)?,
+            exclude: build_focus_globset(exclude).map_err(DiscoveryError::InvalidExclude)?,
+            exclude_patterns: exclude,
+        })
+    }
 }
 
 #[derive(Debug)]
 pub enum DiscoveryError {
     InvalidFocus(globset::Error),
+    InvalidExclude(globset::Error),
     FileLimit { limit: usize },
     Scan(String),
 }
@@ -102,6 +128,7 @@ impl std::fmt::Display for DiscoveryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidFocus(err) => write!(f, "Invalid focus pattern: {err}"),
+            Self::InvalidExclude(err) => write!(f, "Invalid exclude pattern: {err}"),
             Self::FileLimit { limit } => write!(
                 f,
                 "Source file count exceeds {limit}. Select a smaller directory."
@@ -114,7 +141,7 @@ impl std::fmt::Display for DiscoveryError {
 impl std::error::Error for DiscoveryError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::InvalidFocus(err) => Some(err),
+            Self::InvalidFocus(err) | Self::InvalidExclude(err) => Some(err),
             _ => None,
         }
     }
@@ -126,8 +153,19 @@ pub fn discover_files_with_limit(
     focus_patterns: &[String],
     max_files: usize,
 ) -> Result<Discovery, DiscoveryError> {
-    let focus_globset =
-        build_focus_globset(focus_patterns).map_err(DiscoveryError::InvalidFocus)?;
+    discover_files_with_filters(root, focus_patterns, &[], max_files)
+}
+
+/// Discover supported files, then exclude matching paths unless focused.
+/// Patterns use paths relative to the selected directory (a basename for a file).
+/// The scan limit counts retained and excluded files; neither requires reading source.
+pub fn discover_files_with_filters(
+    root: &Path,
+    focus_patterns: &[String],
+    exclude_patterns: &[String],
+    max_files: usize,
+) -> Result<Discovery, DiscoveryError> {
+    let selection = FileSelection::new(focus_patterns, exclude_patterns)?;
     let metadata = match std::fs::metadata(root) {
         Ok(metadata) => metadata,
         Err(err) => {
@@ -142,7 +180,7 @@ pub fn discover_files_with_limit(
         return collect_files(
             base,
             std::iter::once(Ok(root.to_path_buf())),
-            focus_globset.as_ref(),
+            &selection,
             max_files,
         );
     }
@@ -165,16 +203,17 @@ pub fn discover_files_with_limit(
             },
             Ok(_) => None,
         });
-    collect_files(root, entries, focus_globset.as_ref(), max_files)
+    collect_files(root, entries, &selection, max_files)
 }
 
 fn collect_files(
     root: &Path,
     entries: impl IntoIterator<Item = Result<PathBuf, String>>,
-    focus_globset: Option<&GlobSet>,
+    selection: &FileSelection<'_>,
     max_files: usize,
 ) -> Result<Discovery, DiscoveryError> {
     let mut files = Vec::new();
+    let mut excluded = Vec::new();
     let mut warnings = Vec::new();
     for entry in entries {
         let path = match entry {
@@ -190,7 +229,7 @@ fn collect_files(
             .unwrap_or("")
             .to_lowercase();
         if let Some(lang) = get_language_by_extension(&ext) {
-            if files.len() >= max_files {
+            if files.len() + excluded.len() >= max_files {
                 return Err(DiscoveryError::FileLimit { limit: max_files });
             }
             let rel = path
@@ -198,7 +237,24 @@ fn collect_files(
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            let is_focus = focus_globset.map(|set| set.is_match(&rel)).unwrap_or(false);
+            let is_focus = selection
+                .focus
+                .as_ref()
+                .map(|set| set.is_match(&rel))
+                .unwrap_or(false);
+            if !is_focus {
+                if let Some(index) = selection
+                    .exclude
+                    .as_ref()
+                    .and_then(|set| set.matches(&rel).into_iter().next())
+                {
+                    excluded.push(ExcludedFile {
+                        relative_path: rel,
+                        pattern: selection.exclude_patterns[index].clone(),
+                    });
+                    continue;
+                }
+            }
             files.push(DiscoveredFile {
                 absolute_path: path,
                 relative_path: rel,
@@ -208,7 +264,12 @@ fn collect_files(
         }
     }
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    Ok(Discovery { files, warnings })
+    excluded.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    Ok(Discovery {
+        files,
+        excluded,
+        warnings,
+    })
 }
 
 #[cfg(test)]
@@ -223,7 +284,8 @@ mod tests {
             Err("Cannot scan 'private': permission denied".to_owned()),
             Ok(root.join("a.ts")),
         ];
-        let discovery = collect_files(root, entries, None, 10).unwrap();
+        let discovery =
+            collect_files(root, entries, &FileSelection::new(&[], &[]).unwrap(), 10).unwrap();
         assert_eq!(discovery.files.len(), 2);
         assert_eq!(discovery.files[0].relative_path, "a.ts");
         assert_eq!(discovery.files[1].relative_path, "z.py");
@@ -246,7 +308,8 @@ mod tests {
         .chain(std::iter::from_fn(|| {
             panic!("Scanner consumed entries after exceeding its limit")
         }));
-        let error = collect_files(root, entries, None, 2).unwrap_err();
+        let error =
+            collect_files(root, entries, &FileSelection::new(&[], &[]).unwrap(), 2).unwrap_err();
         assert!(matches!(error, DiscoveryError::FileLimit { limit: 2 }));
     }
 
@@ -254,7 +317,8 @@ mod tests {
     fn file_limit_allows_exactly_the_limit() {
         let root = Path::new("project");
         let entries = [Ok(root.join("a.py")), Ok(root.join("b.py"))];
-        let discovery = collect_files(root, entries, None, 2).unwrap();
+        let discovery =
+            collect_files(root, entries, &FileSelection::new(&[], &[]).unwrap(), 2).unwrap();
         assert_eq!(discovery.files.len(), 2);
     }
 }

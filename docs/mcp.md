@@ -11,7 +11,7 @@ cargo build --release --locked
 .\target\release\skel.exe C:\path\to\project --mcp
 ```
 
-启动目录是服务允许读取的范围，必须是目录。工具参数中的相对路径以这个目录为基准；目录外的绝对路径、`..` 越界路径，以及指向目录外文件的符号链接都会被拒绝。
+启动目录是服务允许读取的范围，必须是目录。工具参数中的相对路径以这个目录为基准；目录外的绝对路径、`..` 越界路径，以及保留文件中指向目录外的符号链接都会被拒绝。被 `exclude` 排除的文件不读取内容。
 
 服务启动后等待客户端的 MCP 请求，不会显示 CLI 的压缩报告或预览。标准输出只用于协议，错误信息写到标准错误。客户端关闭连接后服务退出。
 
@@ -46,11 +46,14 @@ cargo build --release --locked
 ```json
 {
   "path": "src",
-  "focus": ["auth.py", "services/**"]
+  "focus": ["auth.py", "services/**"],
+  "exclude": ["docs/**", "tests/**"]
 }
 ```
 
 `path` 可以是文件或目录，省略时扫描整个服务根目录。`focus` 省略时为空数组。上例的匹配对象是 `src` 目录下的相对路径，例如 `src/auth.py` 对应 `auth.py`。选择单个文件时，focus 匹配文件名。
+
+`exclude` 省略时也为空数组，匹配基准与 `focus` 相同，模式中的 Windows 反斜杠会转换为 `/`。命中 `focus` 的文件保留全文，优先于 `exclude`；其他命中 `exclude` 的文件跳过，且不读取或解析源码。固定的隐藏文件和目录忽略规则先于这两个参数生效。CLI 对应参数可以重复，例如 `--exclude "docs/**" --exclude "tests/**"`；MCP 模式请通过工具参数传入，不能与启动参数 `--mcp` 混用。
 
 获取骨架的 JSON-RPC 请求示例（客户端通常会自动构造）：
 
@@ -73,15 +76,21 @@ cargo build --release --locked
 
 ## 返回内容和限制
 
-骨架工具在 `content` 中返回 Markdown，在 `structuredContent` 中返回 `stats`、`files`、`warnings` 和 `markdown_estimated_tokens`。文件模式含义如下：
+骨架工具在 `content` 中返回各文件的 Markdown 正文，在 `structuredContent` 中返回 `stats`、`files`、`warnings` 和 `markdown_estimated_tokens`。汇总信息以 `skel context summary: ` 开头的单行 JSON 写入 stderr 日志，不插入正文；stdout 只输出 MCP 协议消息。
+
+两个工具的结构化元数据均包含 `excluded_count` 和 `excluded_files`。每个排除项包含 `path` 和首个命中的 `pattern`，例如 `{"path":"docs/conf.py","pattern":"docs/**"}`。排除清单不插入 Markdown 正文；统计只包含保留的源码。全部文件被排除时，骨架正文为空，文件数为零。
+
+保留文件的模式含义如下：
 
 - `FULL`：focus 匹配，保留全部源码。
 - `SKELETON`：裁剪后的内容与原文不同。
 - `UNCHANGED`：没有裁剪，可能只有声明，也可能解析失败；不能据此认定解析成功。
 
-Token 数量按 UTF-8 字节数除以 3.5 估算，不是模型 tokenizer 的精确结果。`stats` 只统计源码；`markdown_estimated_tokens` 统计完整 Markdown，包含标题、文件索引和代码围栏，不包含 MCP/JSON 包装。
+Token 数量按 UTF-8 字节数除以 3.5 估算，不是模型 tokenizer 的精确结果。`stats` 只统计源码；`markdown_estimated_tokens` 统计完整 Markdown 正文，包含各文件标题和代码围栏，不包含日志、结构化元数据或 MCP/JSON 包装。
 
 每次调用最多处理 1,000 个源码文件、每文件 2 MiB、总输入 16 MiB，序列化后的工具响应最多 2 MiB。扫描时发现第 1,001 个源码文件便会立即停止。超过限制会返回 `isError: true`，不会截断内容；可缩小 `path` 范围后重试。
+
+扫描数量上限计入保留和被 `exclude` 排除的文件，防止扫描及排除清单无限增长；被排除的源码不计入输入字节数限制。
 
 两个工具都会在 `warnings` 中报告目录遍历或文件元数据读取失败，保留已发现的有效文件；扫描失败且没有发现文件时返回工具错误。骨架工具还会报告源码读取失败或非 UTF-8 文件，全部源码读取失败则返回工具错误。工具参数的类型或字段错误也会作为工具错误返回；未知工具名称属于 JSON-RPC 错误。一次调用失败后，服务仍能处理后续请求。Python、TypeScript/JavaScript 的 AST 使用迭代遍历，深层嵌套不会耗尽工作线程的调用栈。
 

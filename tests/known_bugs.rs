@@ -63,7 +63,7 @@ fn python_missing_function_bodies_are_retained_as_invalid_input() {
     assert_eq!(skeletonize(source, "python", false), source);
 }
 
-fn markdown_for_path(path: &str) -> String {
+fn context_for_path(path: &str) -> (String, String) {
     let file = skel::FileResult {
         path: path.into(),
         lang: "python".into(),
@@ -73,15 +73,19 @@ fn markdown_for_path(path: &str) -> String {
         content: "x = 1".into(),
     };
     let files = [file];
-    skel::format_markdown(&files, &skel::compute_stats(&files))
+    let stats = skel::compute_stats(&files);
+    (
+        skel::format_markdown(&files, &stats),
+        skel::format_context_summary(&files, &stats),
+    )
 }
 
 #[test]
 fn markdown_file_paths_with_backticks_use_longer_inline_delimiters() {
-    let markdown = markdown_for_path("weird`name.py");
+    let (markdown, summary) = context_for_path("weird`name.py");
     assert!(
-        markdown.contains("| ``weird`name.py`` | **FULL** | python | 1 |"),
-        "{markdown}"
+        summary.contains("| ``weird`name.py`` | **FULL** | python | 1 |"),
+        "{summary}"
     );
     assert!(
         markdown.contains("### File: ``weird`name.py`` (FULL)"),
@@ -90,10 +94,14 @@ fn markdown_file_paths_with_backticks_use_longer_inline_delimiters() {
 }
 
 #[test]
-fn markdown_file_paths_with_pipes_are_escaped_in_summary_tables() {
-    let markdown = markdown_for_path("api|internal.py");
+fn file_paths_with_pipes_are_escaped_in_log_summary_tables() {
+    let (markdown, summary) = context_for_path("api|internal.py");
     assert!(
-        markdown.contains("| `api\\|internal.py` | **FULL** | python | 1 |"),
+        summary.contains("| `api\\|internal.py` | **FULL** | python | 1 |"),
+        "{summary}"
+    );
+    assert!(
+        markdown.contains("### File: `api|internal.py` (FULL)"),
         "{markdown}"
     );
 }

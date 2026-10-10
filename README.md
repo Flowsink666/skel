@@ -42,6 +42,7 @@ Tools like **Repomix** pack your entire codebase into a single file for AI promp
 | TypeScript / JavaScript | Tree-sitter AST; prunes block and expression arrow bodies, including TSX/JSX |
 | Go / Rust / Java / C / C++ | Conservative lexical handling |
 | Focus files | Full source for matching `--focus` globs; invalid globs return an error |
+| Exclude files | Repeatable `--exclude` globs; focus overrides exclude; omitted paths are logged |
 | MCP server | Read-only stdio tools via `skel <root> --mcp` |
 | Compression | Depends on implementation size, language, and focus selection |
 
@@ -60,9 +61,21 @@ Ignore rules apply **within the selected root**. Hidden or ignored ancestor
 folders do not prevent scanning an explicitly selected project; ignored child
 folders such as `node_modules`, `.git`, and `target` are skipped.
 
+`--exclude` patterns match paths relative to the selected directory, or the basename
+for a single-file input. Repeat the flag to exclude multiple patterns. `--focus`
+overrides `--exclude`, but does not override built-in child-directory ignore rules.
+Windows separators in patterns are normalized to `/`. Excluded files are not read
+or parsed; their paths and first matching patterns appear in CLI logs or MCP metadata,
+outside the Markdown body. Statistics cover only retained source files. If all
+supported files are excluded, `-o` writes an empty context (`--stats` never writes).
+
 Token counts use a character/byte heuristic rather than a model tokenizer. Cost
 savings use a fixed illustrative rate of $3 per million input tokens, not a live
 model price. Markdown wrapper overhead is not included in compression statistics.
+
+Generated Markdown contains only per-file source sections. The repository summary
+and file index are logged to CLI stdout or MCP stderr, outside the context body.
+MCP responses also retain file and token statistics in structured metadata.
 
 ---
 
@@ -80,6 +93,9 @@ cargo build --release --locked
 
 # Focus on specific files (keep full implementation for auth, skeletonize everything else)
 ./target/release/skel . --focus "*/auth*" -o context.md
+
+# Exclude documentation code, but retain one example in full
+./target/release/skel . --exclude "docs/**" --focus "docs/example.py" -o context.md
 
 # Inspect compression stats without outputting files
 ./target/release/skel . --stats
@@ -120,23 +136,27 @@ cargo build --release --locked
 The server uses the [official Rust MCP SDK](https://github.com/modelcontextprotocol/rust-sdk).
 Its stdout contains only MCP protocol messages. The client launches the process
 and owns its lifetime; errors go to stderr. The startup path must be a directory.
-`--mcp` cannot be combined with CLI `--output`, `--stats`, or `--focus`; focus is
-provided in tool arguments instead.
+`--mcp` cannot be combined with CLI `--output`, `--stats`, `--focus`, or `--exclude`;
+focus and exclude are provided in tool arguments instead.
 
 | Tool | Result |
 | :--- | :--- |
 | `skel_list_files` | Supported file paths, languages, and focus matches |
 | `skel_skeletonize` | Markdown context plus structured file metadata, warnings, and estimated token counts |
 
-Both tools accept `path` (default `"."`) and `focus` (default `[]`). Paths are scoped
-to the startup directory, including canonicalized file symlinks. Focus patterns
+Both tools accept `path` (default `"."`), `focus`, and `exclude` (both default `[]`).
+Paths are scoped to the startup directory, including canonicalized retained file
+symlinks. Focus and exclude patterns
 are relative to the selected directory, or the basename for a single-file input.
 The tools never write files. Existing CLI ignore rules apply; `.gitignore` is not
-read. Python/TS parse failures retain full source with mode `UNCHANGED`.
+read. Focus overrides exclude. Both tools return `excluded_count` and
+`excluded_files` (each entry has `path` and the first matching `pattern`) in structured
+metadata. Python/TS parse failures retain full source with mode `UNCHANGED`.
 
 Requests are limited to 1,000 supported files, 2 MiB per source file, 16 MiB total
 source input, and 2 MiB serialized tool response. Scanning stops as soon as the
-source file count exceeds the limit. Exceeding a limit returns a tool error
+source file count exceeds the limit, counting retained and excluded files.
+Excluded source contents do not count toward input byte limits. Exceeding a limit returns a tool error
 without truncating content. Both tools report directory traversal failures in
 `warnings`; skeletonization also reports unreadable/non-UTF-8 files. A failed
 scan with no discovered files, or an input with no readable source files, is an

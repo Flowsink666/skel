@@ -2,8 +2,8 @@ mod support;
 
 use skel::discover_files;
 use skel::walker::{
-    build_focus_globset, discover_files_with_limit, get_language_by_extension, should_ignore,
-    DiscoveryError, DEFAULT_IGNORES,
+    build_focus_globset, discover_files_with_filters, discover_files_with_limit,
+    get_language_by_extension, should_ignore, DiscoveryError, DEFAULT_IGNORES,
 };
 use std::error::Error;
 use std::fs;
@@ -252,6 +252,100 @@ fn invalid_focus_is_not_silently_discarded_even_on_empty_roots() {
         assert!(matches!(error, DiscoveryError::InvalidFocus(_)));
         assert!(error.source().is_some());
         assert!(error.to_string().starts_with("Invalid focus pattern:"));
+    }
+}
+
+#[test]
+fn exclusions_preserve_focus_exceptions_and_report_first_matching_rule() {
+    let fixture = Fixture::new();
+    for path in [
+        "core.py",
+        "docs/conf.py",
+        "docs/deep/example.py",
+        "docs/deep/theme.py",
+        "tests/test_core.py",
+        "node_modules/ignored.js",
+    ] {
+        fixture.write(path, "");
+    }
+    let discovery = discover_files_with_filters(
+        &fixture.0,
+        &["docs/deep/example.py".into(), "node_modules/**".into()],
+        &["docs\\**".into(), "tests/**".into(), "**/*.py".into()],
+        10,
+    )
+    .unwrap();
+    assert_eq!(discovery.files.len(), 1);
+    assert_eq!(discovery.files[0].relative_path, "docs/deep/example.py");
+    assert!(discovery.files[0].is_focus);
+    let excluded: Vec<_> = discovery
+        .excluded
+        .iter()
+        .map(|file| (file.relative_path.as_str(), file.pattern.as_str()))
+        .collect();
+    assert_eq!(
+        excluded,
+        [
+            ("core.py", "**/*.py"),
+            ("docs/conf.py", "docs\\**"),
+            ("docs/deep/theme.py", "docs\\**"),
+            ("tests/test_core.py", "tests/**"),
+        ]
+    );
+    assert!(discovery.warnings.is_empty());
+}
+
+#[test]
+fn exclusion_paths_are_relative_to_selected_directory_or_single_file_basename() {
+    let fixture = Fixture::new();
+    let file = fixture.write("src/api.py", "");
+    fixture.write("src/model.py", "");
+    let discovery = discover_files_with_filters(
+        &fixture.0.join("src"),
+        &[],
+        &["api.py".into(), "missing/**".into()],
+        10,
+    )
+    .unwrap();
+    assert_eq!(discovery.files[0].relative_path, "model.py");
+    assert_eq!(discovery.excluded[0].relative_path, "api.py");
+    assert!(
+        discover_files_with_filters(&file, &[], &["api.py".into()], 1)
+            .unwrap()
+            .files
+            .is_empty()
+    );
+    assert_eq!(
+        discover_files_with_filters(&file, &[], &["src/api.py".into()], 1)
+            .unwrap()
+            .files
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn invalid_exclude_is_reported_even_on_empty_roots() {
+    let fixture = Fixture::new();
+    let error = discover_files_with_filters(&fixture.0, &[], &["[".into()], 10).unwrap_err();
+    assert!(matches!(error, DiscoveryError::InvalidExclude(_)));
+    assert!(error.source().is_some());
+    assert!(error.to_string().starts_with("Invalid exclude pattern:"));
+}
+
+#[test]
+fn scan_limits_count_excluded_files_as_well_as_retained_files() {
+    let fixture = Fixture::new();
+    fixture.write("a.py", "");
+    fixture.write("b.py", "");
+    let discovery = discover_files_with_filters(&fixture.0, &[], &["a.py".into()], 2).unwrap();
+    assert_eq!(discovery.files.len(), 1);
+    assert_eq!(discovery.excluded.len(), 1);
+    for patterns in [vec!["a.py".into()], vec!["**".into()]] {
+        assert!(matches!(
+            discover_files_with_filters(&fixture.0, &[], &patterns, 1),
+            Err(DiscoveryError::FileLimit { limit: 1 })
+        ));
     }
 }
 

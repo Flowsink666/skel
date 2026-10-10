@@ -1,6 +1,9 @@
 mod support;
 
-use skel::{compute_stats, estimate_tokens, format_markdown, format_terminal_report, FileResult};
+use skel::{
+    compute_stats, estimate_tokens, format_context_summary, format_markdown,
+    format_terminal_report, FileResult,
+};
 use std::fs;
 use support::{assert_success, cli_command, run_cli, run_command, stderr, stdout, Fixture};
 
@@ -22,7 +25,14 @@ fn help_and_version_flags_exit_successfully_without_touching_the_target() {
     for flag in ["--help", "-h"] {
         let output = run_cli(&missing, &[flag]);
         assert_success(&output);
-        for expected in ["Usage:", "--focus", "--output", "--stats", "--mcp"] {
+        for expected in [
+            "Usage:",
+            "--focus",
+            "--exclude",
+            "--output",
+            "--stats",
+            "--mcp",
+        ] {
             assert!(stdout(&output).contains(expected));
         }
         assert!(output.stderr.is_empty());
@@ -75,6 +85,7 @@ fn invalid_arguments_have_usage_errors_and_do_not_write_files() {
     for arguments in [
         vec!["--unknown"],
         vec!["--focus"],
+        vec!["--exclude"],
         vec!["--output"],
         vec!["--stats=maybe"],
         vec!["extra", "another"],
@@ -215,8 +226,9 @@ fn mixed_language_cli_output_matches_all_expected_files_and_statistics() {
     assert_eq!(
         stdout(&output),
         format!(
-            "{}[OK] Context written to: {} ({} bytes)\n",
+            "{}{}[OK] Context written to: {} ({} bytes)\n",
             format_terminal_report(&stats, env!("CARGO_PKG_VERSION")),
+            format_context_summary(&results, &stats),
             output_path.display(),
             skel::formatter::format_thousands(expected.len())
         )
@@ -437,6 +449,102 @@ fn invalid_focus_preserves_existing_output_instead_of_overwriting_it() {
     );
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("Invalid --focus pattern"));
+    assert!(output.stdout.is_empty());
+    assert_eq!(fixture.snapshot(), before);
+}
+
+#[test]
+fn repeated_exclusions_skip_source_reads_and_focus_overrides_them() {
+    let fixture = Fixture::new();
+    let destination = Fixture::new();
+    fixture.write("core.py", "def core():\n    return 1\n");
+    fixture.write("docs/example.py", "def example():\n    return 42\n");
+    fixture.write_bytes("docs/binary.py", &[0xff, 0xfe]);
+    fixture.write("tests/test_core.py", "def test_core():\n    assert False\n");
+    fixture.write("target/ignored.py", "SECRET");
+    let output_path = destination.0.join("context.md");
+    let output = run_cli(
+        &fixture.0,
+        &[
+            "--exclude",
+            "docs/**",
+            "--exclude",
+            "tests/**",
+            "--focus",
+            "docs/example.py",
+            "--focus",
+            "target/**",
+            "-o",
+            output_path.to_str().unwrap(),
+        ],
+    );
+    assert_success(&output);
+    let body = fs::read_to_string(output_path).unwrap();
+    assert!(body.contains("`core.py` (SKELETON)"));
+    assert!(!body.contains("return 1"));
+    assert!(body.contains("`docs/example.py` (FULL)"));
+    assert!(body.contains("return 42"));
+    assert!(!body.contains("binary.py"));
+    assert!(!body.contains("test_core.py"));
+    assert!(!body.contains("ignored.py"));
+    assert!(!body.contains("Excluded"));
+    let log = stdout(&output);
+    assert!(log.contains("Files processed:    2"));
+    assert!(log.contains("Excluded files: 2\n"));
+    let excluded: Vec<serde_json::Value> = log
+        .lines()
+        .filter_map(|line| line.strip_prefix("Excluded: "))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        excluded,
+        vec![
+            serde_json::json!({"path": "docs/binary.py", "pattern": "docs/**"}),
+            serde_json::json!({"path": "tests/test_core.py", "pattern": "tests/**"}),
+        ]
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn excluding_every_file_writes_empty_context_and_stats_only_does_not_write() {
+    let fixture = Fixture::new();
+    fixture.write("api.py", "def api():\n    return 1\n");
+    let output_path = fixture.write("context.md", "existing output");
+    let stats = run_cli(
+        &fixture.0,
+        &[
+            "--exclude",
+            "**",
+            "--stats",
+            "-o",
+            output_path.to_str().unwrap(),
+        ],
+    );
+    assert_success(&stats);
+    assert!(stdout(&stats).contains("Files processed:    0"));
+    assert!(stdout(&stats).contains("Excluded files: 1"));
+    assert_eq!(fs::read_to_string(&output_path).unwrap(), "existing output");
+    let output = run_cli(
+        &fixture.0,
+        &["--exclude", "**", "-o", output_path.to_str().unwrap()],
+    );
+    assert_success(&output);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+}
+
+#[test]
+fn invalid_exclude_preserves_existing_output() {
+    let fixture = Fixture::new();
+    fixture.write("api.py", "def api():\n    return 1\n");
+    let output_path = fixture.write("context.md", "existing output");
+    let before = fixture.snapshot();
+    let output = run_cli(
+        &fixture.0,
+        &["--exclude", "[", "-o", output_path.to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("Invalid --exclude pattern"));
     assert!(output.stdout.is_empty());
     assert_eq!(fixture.snapshot(), before);
 }

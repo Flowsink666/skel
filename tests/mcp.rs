@@ -20,6 +20,14 @@ fn stdio_handshake_discovery_and_clean_shutdown() {
         assert_eq!(tool["inputSchema"]["additionalProperties"], false);
         assert!(tool["inputSchema"]["properties"]["path"].is_object());
         assert!(tool["inputSchema"]["properties"]["focus"].is_object());
+        assert_eq!(
+            tool["inputSchema"]["properties"]["exclude"]["type"],
+            "array"
+        );
+        assert_eq!(
+            tool["inputSchema"]["properties"]["exclude"]["items"]["type"],
+            "string"
+        );
         assert_eq!(tool["annotations"]["readOnlyHint"], true);
         assert_eq!(tool["annotations"]["destructiveHint"], false);
         assert_eq!(tool["annotations"]["idempotentHint"], true);
@@ -35,6 +43,8 @@ fn stdio_handshake_discovery_and_clean_shutdown() {
     let data = &listing["result"]["structuredContent"];
     assert_eq!(data["file_count"], 1);
     assert_eq!(data["files"][0]["path"], "src/api.py");
+    assert_eq!(data["excluded_count"], 0);
+    assert_eq!(data["excluded_files"], json!([]));
     client.close();
 }
 
@@ -103,6 +113,7 @@ fn context_focus_stats_warnings_and_markdown_fences() {
     let context = client.call("skel_skeletonize", arguments);
     assert_ne!(context["result"]["isError"], true, "{context}");
     let markdown = context["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(markdown.starts_with("### File: `auth.py` (FULL)\n"));
     assert!(markdown.contains("`auth.py` (FULL)"));
     assert!(markdown.contains("return 42"));
     assert!(markdown.contains("`models.py` (SKELETON)"));
@@ -129,6 +140,87 @@ fn context_focus_stats_warnings_and_markdown_fences() {
         1
     );
     client.close();
+    let logs: Vec<Value> = client
+        .logs()
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line.strip_prefix("skel context summary: ").unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(
+        logs,
+        vec![data.clone(), single["result"]["structuredContent"].clone()]
+    );
+}
+
+#[test]
+fn exclusions_match_listing_and_context_without_reading_excluded_sources() {
+    let fixture = Fixture::new();
+    fixture.write("src/core.py", "def core():\n    return 1\n");
+    fixture.write("src/docs/example.py", "def example():\n    return 42\n");
+    fixture.write("src/docs/huge.py", &"x".repeat(2 * 1024 * 1024 + 1));
+    fixture.write_bytes("src/docs/binary.py", &[0xff, 0xfe]);
+    fixture.write(
+        "src/tests/test_core.py",
+        "def test_core():\n    assert False\n",
+    );
+    let mut client = Client::new(&fixture);
+    let args = json!({
+        "path": "src", "focus": ["docs/example.py"],
+        "exclude": ["docs/**", "tests/**"],
+    });
+    let listing = client.call("skel_list_files", args.clone());
+    let context = client.call("skel_skeletonize", args);
+    let list = success(&listing);
+    let data = success(&context);
+    assert_eq!(list["file_count"], 2);
+    assert_eq!(data["stats"]["file_count"], 2);
+    assert_eq!(data["files"][0]["path"], list["files"][0]["path"]);
+    assert_eq!(data["files"][1]["path"], list["files"][1]["path"]);
+    assert_eq!(data["files"][1]["mode"], "FULL");
+    let excluded = json!([
+        {"path": "docs/binary.py", "pattern": "docs/**"},
+        {"path": "docs/huge.py", "pattern": "docs/**"},
+        {"path": "tests/test_core.py", "pattern": "tests/**"},
+    ]);
+    assert_eq!(data["excluded_files"], excluded);
+    assert_eq!(list["excluded_files"], excluded);
+    assert_eq!(data["excluded_count"], 3);
+    assert_eq!(list["excluded_count"], 3);
+    assert_eq!(data["warnings"], json!([]));
+    let body = markdown(&context);
+    assert!(body.contains("`core.py` (SKELETON)"));
+    assert!(body.contains("return 42"));
+    assert!(!body.contains("return 1"));
+    for path in ["binary.py", "huge.py", "test_core.py"] {
+        assert!(!body.contains(path));
+    }
+    // A focused file is retained, so its normal source limits still apply.
+    tool_error(
+        &client.call(
+            "skel_skeletonize",
+            json!({
+                "path": "src", "focus": ["docs/huge.py"], "exclude": ["docs/**"],
+            }),
+        ),
+        "exceeds 2 MiB",
+    );
+    let empty = client.call(
+        "skel_skeletonize",
+        json!({"path": "src", "exclude": ["**"]}),
+    );
+    assert_eq!(success(&empty)["stats"]["file_count"], 0);
+    assert_eq!(success(&empty)["excluded_count"], 5);
+    assert_eq!(markdown(&empty), "");
+    client.close();
+    let logs: Vec<Value> = client
+        .logs()
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line.strip_prefix("skel context summary: ").unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(logs, vec![data.clone(), success(&empty).clone()]);
 }
 
 #[test]
@@ -143,6 +235,8 @@ fn errors_are_reported_and_server_remains_usable() {
         json!({"path": outside.0.join("secret.py")}),
         json!({"path": "missing.py"}),
         json!({"focus": ["["]}),
+        json!({"exclude": ["["]}),
+        json!({"exclude": "*.py"}),
     ] {
         let response = client.call("skel_skeletonize", arguments);
         assert_eq!(response["result"]["isError"], true, "{response}");
@@ -173,6 +267,7 @@ fn mcp_rejects_conflicting_cli_flags_and_file_roots() {
     for arguments in [
         vec!["--stats"],
         vec!["--focus", "*.py"],
+        vec!["--exclude", "*.py"],
         vec!["--output", "context.md"],
     ] {
         let mut flags = vec!["--mcp"];
@@ -240,6 +335,10 @@ fn empty_inputs_unreadable_inputs_and_resource_limits() {
             .unwrap()
             .contains("1000"));
         assert!(client.request("ping", json!({}))["result"].is_object());
+        tool_error(
+            &client.call(tool, json!({"path": "many", "exclude": ["**"]})),
+            "1000",
+        );
     }
     client.close();
 }
@@ -323,7 +422,7 @@ fn listing_is_sorted_normalizes_paths_and_focus_is_relative_to_selected_input() 
             "files": [
                 {"path": "nested/a.TSX", "language": "typescript", "focus": true},
                 {"path": "z.py", "language": "python", "focus": true}
-            ], "warnings": []
+            ], "warnings": [], "excluded_count": 0, "excluded_files": []
         })
     );
     let text = response["result"]["content"][0]["text"].as_str().unwrap();
@@ -408,6 +507,7 @@ fn public_parameter_defaults_and_server_root_validation_are_explicit() {
     let params: skel::mcp::ContextParams = serde_json::from_value(json!({})).unwrap();
     assert_eq!(params.path, ".");
     assert!(params.focus.is_empty());
+    assert!(params.exclude.is_empty());
     assert!(serde_json::from_value::<skel::mcp::ContextParams>(json!({"unknown": 1})).is_err());
     let fixture = Fixture::new();
     assert!(skel::mcp::SkelServer::new(&fixture.0).is_ok());
@@ -546,7 +646,7 @@ fn empty_and_unsupported_inputs_return_complete_zero_statistics() {
         let listing = client.call("skel_list_files", arguments.clone());
         assert_eq!(
             success(&listing),
-            &json!({"file_count": 0, "files": [], "warnings": []})
+            &json!({"file_count": 0, "files": [], "warnings": [], "excluded_count": 0, "excluded_files": []})
         );
         let context = client.call("skel_skeletonize", arguments);
         let data = success(&context);

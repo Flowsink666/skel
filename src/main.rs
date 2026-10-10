@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use std::process;
 
 use skel::formatter::format_thousands;
-use skel::walker::{discover_files_with_limit, DiscoveryError};
+use skel::walker::{discover_files_with_filters, DiscoveryError};
 use skel::{
-    compute_stats, estimate_tokens, format_markdown, format_terminal_report, skeletonize,
-    FileResult,
+    compute_stats, estimate_tokens, format_context_summary, format_markdown,
+    format_terminal_report, skeletonize, FileResult,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -27,6 +27,10 @@ struct Args {
     #[arg(short, long, action = clap::ArgAction::Append)]
     focus: Vec<String>,
 
+    /// Exclude matching paths; --focus takes precedence (e.g. --exclude 'docs/**')
+    #[arg(long, action = clap::ArgAction::Append)]
+    exclude: Vec<String>,
+
     /// Write output to file (e.g. -o context.md)
     #[arg(short, long)]
     output: Option<PathBuf>,
@@ -36,7 +40,7 @@ struct Args {
     stats: bool,
 
     /// Serve read-only MCP tools over stdin/stdout, scoped to the target directory
-    #[arg(long, conflicts_with_all = ["focus", "output", "stats"])]
+    #[arg(long, conflicts_with_all = ["focus", "exclude", "output", "stats"])]
     mcp: bool,
 }
 
@@ -61,11 +65,18 @@ fn main() {
         }
     };
 
-    let discovery =
-        discover_files_with_limit(&root, &args.focus, usize::MAX).unwrap_or_else(|err| {
-            if let DiscoveryError::InvalidFocus(err) = err {
-                eprintln!("Error: Invalid --focus pattern: {err}");
-                process::exit(2);
+    let discovery = discover_files_with_filters(&root, &args.focus, &args.exclude, usize::MAX)
+        .unwrap_or_else(|err| {
+            match err {
+                DiscoveryError::InvalidFocus(err) => {
+                    eprintln!("Error: Invalid --focus pattern: {err}");
+                    process::exit(2);
+                }
+                DiscoveryError::InvalidExclude(err) => {
+                    eprintln!("Error: Invalid --exclude pattern: {err}");
+                    process::exit(2);
+                }
+                _ => {}
             }
             eprintln!("Error: {err}");
             process::exit(1);
@@ -76,8 +87,14 @@ fn main() {
     if discovery.files.is_empty() && !discovery.warnings.is_empty() {
         process::exit(1);
     }
+    if !discovery.excluded.is_empty() {
+        println!("Excluded files: {}", discovery.excluded.len());
+        for file in &discovery.excluded {
+            println!("Excluded: {}", serde_json::to_string(file).unwrap());
+        }
+    }
     let discovered = discovery.files;
-    if discovered.is_empty() {
+    if discovered.is_empty() && discovery.excluded.is_empty() {
         println!("No supported source files found in target directory.");
         return;
     }
@@ -126,6 +143,7 @@ fn main() {
         return;
     }
 
+    print!("{}", format_context_summary(&results, &repo_stats));
     let md_content = format_markdown(&results, &repo_stats);
 
     if let Some(out_path) = args.output {
