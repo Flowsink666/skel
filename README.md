@@ -1,32 +1,32 @@
 # 🦴 skel (Skeletonizer)
 
 > **AST-aware Code Skeletonizer for LLM Prompts & Agent Contexts**  
-> *Compress your codebase tokens by 80–95% while keeping 100% of types, signatures, and docstrings.*
+> *Reduce codebase context by pruning implementation bodies while retaining declarations, signatures, and docstrings.*
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python: 3.9+](https://img.shields.io/badge/python-3.9+-brightgreen.svg)](https://python.org)
+[![Rust: 1.90+](https://img.shields.io/badge/rust-1.90+-orange.svg)](https://www.rust-lang.org)
 
 ---
 
 ## ⚡ Why `skel`? (The Problem with Code Packers)
 
 Tools like **Repomix** pack your entire codebase into a single file for AI prompts. But on real-world projects, this hits major walls:
-1. **Expensive Token Waste**: A 200-file project consumes 100k–300k tokens. Every chat query costs real money ($0.30–$1.00+ on Claude 3.5 Sonnet / GPT-4o).
-2. **Context Dilution ("Lost in the Middle")**: 90% of code lines are internal implementation details (loops, error handling, helper functions). LLMs get distracted and hallucinate when overwhelmed by implementation noise.
-3. **The "All-or-Nothing" Dilemma**: Repomix either includes the full file or excludes it entirely. If you exclude a file, the AI loses critical type interfaces and method signatures.
+1. **Token Usage**: Packing full implementations increases prompt size, especially in repositories with large function bodies.
+2. **Context Dilution**: Loops, error handling, and helper implementations can obscure the interfaces relevant to a task.
+3. **File Selection**: Excluding a whole file also removes its types and method signatures from the context.
 
 ### The `skel` Solution: The Context Pyramid
 
-`skel` performs **AST-level surgical extraction**:
+`skel` uses AST extraction for Python and TypeScript/JavaScript in the Rust CLI:
 * **Keeps**: Interfaces, types, structs, exported signatures, parameter annotations, and docstrings.
-* **Prunes**: Replaces function and method bodies with syntactically valid placeholders (`...` or `{ /* ... */ }`).
+* **Prunes**: Replaces function and method bodies with placeholders (`...` or `{ /* ... */ }`). These are context summaries, not runnable or type-checked implementations.
 * **Progressive Focus (`--focus`)**: Keep 100% of the full code for files you are actively working on, while skeletonizing all dependencies.
 
 ```
 ┌──────────────────────────────────────────────┐
 │  Tier 1: Focus Files (100% Full Code)        │  <-- e.g. src/auth/jwt.ts
 ├──────────────────────────────────────────────┤
-│  Tier 2: Background Files (AST Skeletons)    │  <-- 80-95% Token Reduction!
+│  Tier 2: Background Files (AST Skeletons)    │  <-- Reduced implementation detail
 ├──────────────────────────────────────────────┤
 │  Tier 3: Repository Structure & File Index   │
 └──────────────────────────────────────────────┘
@@ -34,41 +34,67 @@ Tools like **Repomix** pack your entire codebase into a single file for AI promp
 
 ---
 
-## 📊 Comparison with Repomix
+## Supported Behavior
 
-| Feature | Repomix | `skel` |
-| :--- | :--- | :--- |
-| **Philosophy** | Code Packer (pack everything) | **Intelligent Context Pruner** |
-| **Compression** | Removes comments & empty lines | **Empties implementation bodies via AST** |
-| **Docstrings** | Deleted when stripping comments ❌ | **Preserved (critical for AI reasoning) ✅** |
-| **Syntax Validity** | Plain text minification | **100% syntactically valid code** |
-| **Progressive Focus** | ❌ (All files treated equally) | **✅ (`--focus "src/api/*"`)** |
-| **Token Reduction** | ~10% – 20% | **~80% – 95%** |
-| **MCP Integration** | External CLI only | **Native MCP tool coming soon** |
+| Feature | Rust CLI |
+| :--- | :--- |
+| Python | Tree-sitter AST; keeps docstrings and original signature text |
+| TypeScript / JavaScript | Tree-sitter AST; prunes block and expression arrow bodies, including TSX/JSX |
+| Go / Rust / Java / C / C++ | Conservative lexical handling |
+| Focus files | Full source for matching `--focus` globs; invalid globs return an error |
+| Compression | Depends on implementation size, language, and focus selection |
+
+The implementation and tests are written in Rust. No Python interpreter is
+required to build, run, or test `skel`. The `src/python.rs` module and
+`tree-sitter-python` dependency parse Python source code; files under
+`examples/python_service` are sample inputs.
+
+The lexical fallback masks strings and comments before matching complete brace
+pairs. It retains unbalanced input unchanged and may leave unfamiliar constructs
+unpruned. It is not a complete parser for these languages and cannot guarantee
+syntax for every language feature. Invalid Python/TypeScript AST input in the
+Rust CLI is also retained unchanged.
+
+Ignore rules apply **within the selected root**. Hidden or ignored ancestor
+folders do not prevent scanning an explicitly selected project; ignored child
+folders such as `node_modules`, `.git`, and `target` are skipped.
+
+Token counts use a character/byte heuristic rather than a model tokenizer. Cost
+savings use a fixed illustrative rate of $3 per million input tokens, not a live
+model price. Markdown wrapper overhead is not included in compression statistics.
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Zero-dependency CLI
-`skel` is built with zero external dependencies.
+### 1. Build and Run
+Powered by native Tree-sitter parsers:
 
 ```bash
+# Build release binary
+cargo build --release --locked
+
 # Run on current directory and generate context.md
-python skel.py . -o context.md
+./target/release/skel . -o context.md
 
 # Focus on specific files (keep full implementation for auth, skeletonize everything else)
-python skel.py . --focus "*/auth*" -o context.md
+./target/release/skel . --focus "*/auth*" -o context.md
 
 # Inspect compression stats without outputting files
-python skel.py . --stats
+./target/release/skel . --stats
 ```
 
-### 2. Sample Output in Terminal
+On Windows, run the release executable from PowerShell:
+
+```powershell
+.\target\release\skel.exe . -o context.md
+```
+
+### 2. Sample Output in Terminal (Illustrative)
 
 ```text
 ============================================================
- [skel v0.1.0] Codebase Context Compression Report
+ [skel v0.2.0] Codebase Context Compression Report
 ------------------------------------------------------------
  Files processed:    28
  Original tokens:    48,210
@@ -83,7 +109,7 @@ python skel.py . --stats
 
 ## 📂 Example: Before & After
 
-### Original Code (52 lines):
+### Original Code:
 ```python
 class AuthService:
     def __init__(self, token_ttl: int = 3600):
@@ -103,7 +129,7 @@ class AuthService:
         return hmac.compare_digest(calculated, expected_hash)
 ```
 
-### Skeleton Output (14 lines, 100% syntactically valid):
+### Skeleton Output:
 ```python
 class AuthService:
 
@@ -119,7 +145,27 @@ class AuthService:
         ...
 ```
 
-The LLM knows **exactly what the class does and how to call it**, without paying tokens for lines of hashing algorithms!
+The context retains the class interface and method documentation while omitting the hashing implementation.
+
+---
+
+## Development Checks
+
+```bash
+cargo fmt --check
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
+```
+
+The regression suite covers literal/comment braces, nested blocks, multiline
+signatures, Python inline and Tab-indented docstrings, expression arrow functions,
+ignored ancestors, focus matching, and invalid Rust CLI focus patterns.
+
+The crate declares Rust 1.90 as its minimum version to match the locked dependency
+requirements.
+
+Library callers must handle the `Result` returned by `discover_files` and
+`build_focus_globset`; invalid focus patterns are propagated as errors.
 
 ---
 
@@ -128,8 +174,8 @@ The LLM knows **exactly what the class does and how to call it**, without paying
 - [x] Python AST Skeletonizer (retaining docstrings & types)
 - [x] TypeScript / JavaScript brace-aware skeletonizer
 - [x] Mixed context mode (`--focus` flag)
-- [x] Token savings calculator ($USD & %)
-- [ ] Tree-sitter core engine rewrite (Rust / WASM)
+- [x] Tree-sitter core engine rewrite in Rust (Python & TS/JS support)
+- [ ] WebAssembly (WASM) build
 - [ ] Reverse Token Budgeting (`--max-tokens 32k` adaptive reduction)
 - [ ] Native **Model Context Protocol (MCP)** server integration (`skel --mcp`)
 - [ ] Interactive TUI file picker (`skel --interactive`)

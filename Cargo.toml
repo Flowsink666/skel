@@ -1,0 +1,17 @@
+[package]
+name = "skel"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.90"
+description = "AST-aware Code Skeletonizer for LLM Prompts & Agent Contexts"
+license = "MIT"
+repository = "https://github.com/Flowsink666/skel"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+tree-sitter = "0.25"
+tree-sitter-python = "0.25"
+tree-sitter-typescript = "0.23"
+walkdir = "2.5"
+globset = "0.4"
+regex = "1.11"
