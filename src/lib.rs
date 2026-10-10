@@ -1,5 +1,6 @@
 pub mod c_like;
 pub mod formatter;
+pub mod mcp;
 pub mod python;
 pub mod skeletonizer;
 pub mod stats;

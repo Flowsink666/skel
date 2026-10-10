@@ -15,6 +15,13 @@ pub fn format_thousands(n: usize) -> String {
     result
 }
 
+fn format_code_span(text: &str) -> String {
+    let longest_run = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let delimiter_len = if longest_run == 0 { 1 } else { longest_run + 1 };
+    let delimiter = "`".repeat(delimiter_len);
+    format!("{delimiter}{text}{delimiter}")
+}
+
 /// Format results into a clean, LLM-optimized Markdown document.
 pub fn format_markdown(results: &[FileResult], stats: &RepoStats) -> String {
     let mut lines = Vec::new();
@@ -31,9 +38,9 @@ pub fn format_markdown(results: &[FileResult], stats: &RepoStats) -> String {
     lines.push("| :--- | :--- | :--- | :--- |".to_string());
 
     for r in results {
+        let table_path = format_code_span(&r.path.replace('|', "\\|"));
         lines.push(format!(
-            "| `{}` | **{}** | {} | {} |",
-            r.path,
+            "| {table_path} | **{}** | {} | {} |",
             r.mode,
             r.lang,
             format_thousands(r.skel_tokens)
@@ -43,8 +50,17 @@ pub fn format_markdown(results: &[FileResult], stats: &RepoStats) -> String {
     lines.push("\n---\n".to_string());
 
     for r in results {
-        lines.push(format!("### File: `{}` ({})", r.path, r.mode));
-        lines.push(format!("```{}\n{}\n```\n", r.lang, r.content));
+        let file_path = format_code_span(&r.path);
+        lines.push(format!("### File: {file_path} ({})", r.mode));
+        // Docstrings and comments can contain fenced examples themselves.
+        let longest_run = r
+            .content
+            .split(|c| c != '`')
+            .map(str::len)
+            .max()
+            .unwrap_or(0);
+        let fence = "`".repeat(3.max(longest_run + 1));
+        lines.push(format!("{fence}{}\n{}\n{fence}\n", r.lang, r.content));
     }
 
     lines.join("\n")

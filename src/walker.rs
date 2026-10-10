@@ -66,6 +66,7 @@ pub fn build_focus_globset(patterns: &[String]) -> Result<Option<GlobSet>, globs
     builder.build().map(Some)
 }
 
+#[derive(Debug)]
 pub struct DiscoveredFile {
     pub absolute_path: PathBuf,
     pub relative_path: String,
@@ -76,73 +77,184 @@ pub struct DiscoveredFile {
 pub fn discover_files(
     root: &Path,
     focus_patterns: &[String],
-) -> Result<Vec<DiscoveredFile>, globset::Error> {
-    let focus_globset = build_focus_globset(focus_patterns)?;
-    let mut files = Vec::new();
+) -> Result<Vec<DiscoveredFile>, DiscoveryError> {
+    let discovery = discover_files_with_limit(root, focus_patterns, usize::MAX)?;
+    if !discovery.warnings.is_empty() {
+        return Err(DiscoveryError::Scan(discovery.warnings.join("\n")));
+    }
+    Ok(discovery.files)
+}
 
-    if root.is_file() {
-        let ext = root
+#[derive(Debug)]
+pub struct Discovery {
+    pub files: Vec<DiscoveredFile>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug)]
+pub enum DiscoveryError {
+    InvalidFocus(globset::Error),
+    FileLimit { limit: usize },
+    Scan(String),
+}
+
+impl std::fmt::Display for DiscoveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidFocus(err) => write!(f, "Invalid focus pattern: {err}"),
+            Self::FileLimit { limit } => write!(
+                f,
+                "Source file count exceeds {limit}. Select a smaller directory."
+            ),
+            Self::Scan(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for DiscoveryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidFocus(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+/// Collect supported files, preserving scan failures and stopping at the limit.
+pub fn discover_files_with_limit(
+    root: &Path,
+    focus_patterns: &[String],
+    max_files: usize,
+) -> Result<Discovery, DiscoveryError> {
+    let focus_globset =
+        build_focus_globset(focus_patterns).map_err(DiscoveryError::InvalidFocus)?;
+    let metadata = match std::fs::metadata(root) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            return Err(DiscoveryError::Scan(format!(
+                "Cannot inspect '{}': {err}",
+                root.display()
+            )))
+        }
+    };
+    if metadata.is_file() {
+        let base = root.parent().unwrap_or(Path::new(""));
+        return collect_files(
+            base,
+            std::iter::once(Ok(root.to_path_buf())),
+            focus_globset.as_ref(),
+            max_files,
+        );
+    }
+
+    let entries = WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| {
+            e.depth() == 0 || !should_ignore(e.path().strip_prefix(root).unwrap_or(e.path()))
+        })
+        .filter_map(|entry| match entry {
+            Err(err) => Some(Err(format!("Cannot scan directory: {err}"))),
+            Ok(entry) if entry.file_type().is_file() => Some(Ok(entry.into_path())),
+            Ok(entry) if entry.file_type().is_symlink() => match std::fs::metadata(entry.path()) {
+                Ok(metadata) if metadata.is_file() => Some(Ok(entry.into_path())),
+                Ok(_) => None,
+                Err(err) => Some(Err(format!(
+                    "Cannot inspect '{}': {err}",
+                    entry.path().display()
+                ))),
+            },
+            Ok(_) => None,
+        });
+    collect_files(root, entries, focus_globset.as_ref(), max_files)
+}
+
+fn collect_files(
+    root: &Path,
+    entries: impl IntoIterator<Item = Result<PathBuf, String>>,
+    focus_globset: Option<&GlobSet>,
+    max_files: usize,
+) -> Result<Discovery, DiscoveryError> {
+    let mut files = Vec::new();
+    let mut warnings = Vec::new();
+    for entry in entries {
+        let path = match entry {
+            Ok(path) => path,
+            Err(err) => {
+                warnings.push(err);
+                continue;
+            }
+        };
+        let ext = path
             .extension()
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_lowercase();
         if let Some(lang) = get_language_by_extension(&ext) {
-            let rel_str = root
-                .file_name()
-                .unwrap_or_default()
+            if files.len() >= max_files {
+                return Err(DiscoveryError::FileLimit { limit: max_files });
+            }
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            let is_focus = focus_globset
-                .as_ref()
-                .map(|set| set.is_match(&rel_str))
-                .unwrap_or(false);
-
+            let is_focus = focus_globset.map(|set| set.is_match(&rel)).unwrap_or(false);
             files.push(DiscoveredFile {
-                absolute_path: root.to_path_buf(),
-                relative_path: rel_str,
+                absolute_path: path,
+                relative_path: rel,
                 lang,
                 is_focus,
             });
         }
-        return Ok(files);
     }
-
-    let base_dir = root;
-    for entry in WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| {
-            e.depth() == 0 || !should_ignore(e.path().strip_prefix(root).unwrap_or(e.path()))
-        })
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if path.is_file() {
-            let ext = path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            if let Some(lang) = get_language_by_extension(&ext) {
-                let rel = match path.strip_prefix(base_dir) {
-                    Ok(r) => r.to_string_lossy().replace('\\', "/"),
-                    Err(_) => path.to_string_lossy().replace('\\', "/"),
-                };
-
-                let is_focus = focus_globset
-                    .as_ref()
-                    .map(|set| set.is_match(&rel))
-                    .unwrap_or(false);
-
-                files.push(DiscoveredFile {
-                    absolute_path: path.to_path_buf(),
-                    relative_path: rel,
-                    lang,
-                    is_focus,
-                });
-            }
-        }
-    }
-
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    Ok(files)
+    Ok(Discovery { files, warnings })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_errors_are_preserved_with_partial_results() {
+        let root = Path::new("project");
+        let entries = [
+            Ok(root.join("z.py")),
+            Err("Cannot scan 'private': permission denied".to_owned()),
+            Ok(root.join("a.ts")),
+        ];
+        let discovery = collect_files(root, entries, None, 10).unwrap();
+        assert_eq!(discovery.files.len(), 2);
+        assert_eq!(discovery.files[0].relative_path, "a.ts");
+        assert_eq!(discovery.files[1].relative_path, "z.py");
+        assert_eq!(
+            discovery.warnings,
+            ["Cannot scan 'private': permission denied"]
+        );
+    }
+
+    #[test]
+    fn file_limit_stops_consuming_entries_immediately() {
+        let root = Path::new("project");
+        let entries = [
+            Ok(root.join("notes.txt")),
+            Ok(root.join("a.py")),
+            Ok(root.join("b.py")),
+            Ok(root.join("c.py")),
+        ]
+        .into_iter()
+        .chain(std::iter::from_fn(|| {
+            panic!("Scanner consumed entries after exceeding its limit")
+        }));
+        let error = collect_files(root, entries, None, 2).unwrap_err();
+        assert!(matches!(error, DiscoveryError::FileLimit { limit: 2 }));
+    }
+
+    #[test]
+    fn file_limit_allows_exactly_the_limit() {
+        let root = Path::new("project");
+        let entries = [Ok(root.join("a.py")), Ok(root.join("b.py"))];
+        let discovery = collect_files(root, entries, None, 2).unwrap();
+        assert_eq!(discovery.files.len(), 2);
+    }
 }

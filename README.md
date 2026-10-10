@@ -42,6 +42,7 @@ Tools like **Repomix** pack your entire codebase into a single file for AI promp
 | TypeScript / JavaScript | Tree-sitter AST; prunes block and expression arrow bodies, including TSX/JSX |
 | Go / Rust / Java / C / C++ | Conservative lexical handling |
 | Focus files | Full source for matching `--focus` globs; invalid globs return an error |
+| MCP server | Read-only stdio tools via `skel <root> --mcp` |
 | Compression | Depends on implementation size, language, and focus selection |
 
 The implementation and tests are written in Rust. No Python interpreter is
@@ -104,6 +105,46 @@ On Windows, run the release executable from PowerShell:
 ============================================================
 [OK] Context written to: context.md (18,420 bytes)
 ```
+
+---
+
+## MCP Server
+
+Build the same executable and launch it as a local stdio MCP server:
+
+```bash
+cargo build --release --locked
+./target/release/skel /absolute/path/to/project --mcp
+```
+
+The server uses the [official Rust MCP SDK](https://github.com/modelcontextprotocol/rust-sdk).
+Its stdout contains only MCP protocol messages. The client launches the process
+and owns its lifetime; errors go to stderr. The startup path must be a directory.
+`--mcp` cannot be combined with CLI `--output`, `--stats`, or `--focus`; focus is
+provided in tool arguments instead.
+
+| Tool | Result |
+| :--- | :--- |
+| `skel_list_files` | Supported file paths, languages, and focus matches |
+| `skel_skeletonize` | Markdown context plus structured file metadata, warnings, and estimated token counts |
+
+Both tools accept `path` (default `"."`) and `focus` (default `[]`). Paths are scoped
+to the startup directory, including canonicalized file symlinks. Focus patterns
+are relative to the selected directory, or the basename for a single-file input.
+The tools never write files. Existing CLI ignore rules apply; `.gitignore` is not
+read. Python/TS parse failures retain full source with mode `UNCHANGED`.
+
+Requests are limited to 1,000 supported files, 2 MiB per source file, 16 MiB total
+source input, and 2 MiB serialized tool response. Scanning stops as soon as the
+source file count exceeds the limit. Exceeding a limit returns a tool error
+without truncating content. Both tools report directory traversal failures in
+`warnings`; skeletonization also reports unreadable/non-UTF-8 files. A failed
+scan with no discovered files, or an input with no readable source files, is an
+error. Python/TS/JS AST traversal is iterative, so deeply nested syntax does not
+consume the worker's call stack.
+
+See [MCP setup and examples (中文)](docs/mcp.md) and the
+[client configuration example](docs/mcp-servers.json).
 
 ---
 
@@ -177,7 +218,7 @@ Library callers must handle the `Result` returned by `discover_files` and
 - [x] Tree-sitter core engine rewrite in Rust (Python & TS/JS support)
 - [ ] WebAssembly (WASM) build
 - [ ] Reverse Token Budgeting (`--max-tokens 32k` adaptive reduction)
-- [ ] Native **Model Context Protocol (MCP)** server integration (`skel --mcp`)
+- [x] Native **Model Context Protocol (MCP)** server integration (`skel --mcp`, stdio)
 - [ ] Interactive TUI file picker (`skel --interactive`)
 
 ---

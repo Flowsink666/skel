@@ -1,30 +1,22 @@
+mod support;
+
 use skel::discover_files;
+use skel::walker::{discover_files_with_limit, DiscoveryError};
 use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use support::{run_cli, Fixture};
 
-static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
-
-struct Fixture(PathBuf);
-
-impl Fixture {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "skel-test-{}-{}",
-            std::process::id(),
-            NEXT_ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        // The fixture path is an explicitly created child of the temp directory.
-        let _ = fs::remove_dir_all(&self.0);
-    }
+#[test]
+fn missing_scan_roots_are_errors_instead_of_empty_successes() {
+    let fixture = Fixture::new();
+    let missing = fixture.0.join("missing");
+    assert!(matches!(
+        discover_files(&missing, &[]),
+        Err(DiscoveryError::Scan(_))
+    ));
+    assert!(matches!(
+        discover_files_with_limit(&missing, &[], 1_000),
+        Err(DiscoveryError::Scan(_))
+    ));
 }
 
 #[test]
@@ -60,12 +52,10 @@ fn rejects_invalid_focus_patterns_in_library_and_cli() {
     fs::write(&file, "def api():\n    return 1\n").unwrap();
     assert!(discover_files(&file, &["[".to_string()]).is_err());
     let output_path = fixture.0.join("context.md");
-    let output = Command::new(env!("CARGO_BIN_EXE_skel"))
-        .arg(&file)
-        .args(["--focus", "[", "--output"])
-        .arg(&output_path)
-        .output()
-        .unwrap();
+    let output = run_cli(
+        &file,
+        &["--focus", "[", "--output", output_path.to_str().unwrap()],
+    );
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("Invalid --focus pattern"));
     assert!(!output_path.exists());
@@ -78,12 +68,15 @@ fn cli_focus_preserves_full_code_and_other_files_are_pruned() {
         fs::write(fixture.0.join(name), "def api():\n    return 42\n").unwrap();
     }
     let output_path = fixture.0.join("context.md");
-    let output = Command::new(env!("CARGO_BIN_EXE_skel"))
-        .arg(&fixture.0)
-        .args(["--focus", "auth.py", "--output"])
-        .arg(&output_path)
-        .output()
-        .unwrap();
+    let output = run_cli(
+        &fixture.0,
+        &[
+            "--focus",
+            "auth.py",
+            "--output",
+            output_path.to_str().unwrap(),
+        ],
+    );
     assert!(output.status.success());
     let markdown = fs::read_to_string(output_path).unwrap();
     assert!(markdown.contains("`auth.py` (FULL)"));

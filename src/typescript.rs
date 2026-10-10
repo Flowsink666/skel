@@ -1,3 +1,4 @@
+use crate::skeletonizer::walk_prunable;
 use tree_sitter::{Node, Parser};
 
 /// Prune implementation bodies in TypeScript/JavaScript AST while retaining
@@ -43,32 +44,32 @@ pub fn skeletonize_typescript(source: &str, is_tsx: bool) -> String {
 }
 
 fn collect_ts_prune_ranges(node: Node, ranges: &mut Vec<(usize, usize, &'static str)>) {
-    let kind = node.kind();
-    match kind {
-        "function_declaration"
-        | "method_definition"
-        | "generator_function_declaration"
-        | "function_expression" => {
-            if let Some(body) = node.child_by_field_name("body") {
-                if body.kind() == "statement_block" {
-                    ranges.push((body.start_byte(), body.end_byte(), "{ /* ... */ }"));
-                    return; // Do not recurse into pruned body
+    walk_prunable(node, |node| {
+        let kind = node.kind();
+        match kind {
+            "function_declaration"
+            | "method_definition"
+            | "generator_function_declaration"
+            | "function_expression"
+            | "generator_function" => {
+                if let Some(body) = node.child_by_field_name("body") {
+                    if body.kind() == "statement_block" {
+                        ranges.push((body.start_byte(), body.end_byte(), "{ /* ... */ }"));
+                        return false; // Do not descend into a pruned body.
+                    }
                 }
             }
-        }
-        "arrow_function" => {
-            if let Some(body) = node.child_by_field_name("body") {
-                ranges.push((body.start_byte(), body.end_byte(), "{ /* ... */ }"));
-                return;
+            "arrow_function" => {
+                if let Some(body) = node.child_by_field_name("body") {
+                    ranges.push((body.start_byte(), body.end_byte(), "{ /* ... */ }"));
+                    return false;
+                }
             }
+            _ => {}
         }
-        _ => {}
-    }
 
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_ts_prune_ranges(child, ranges);
-    }
+        true
+    });
 }
 
 #[cfg(test)]

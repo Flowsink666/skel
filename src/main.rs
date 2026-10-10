@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use std::process;
 
 use skel::formatter::format_thousands;
+use skel::walker::{discover_files_with_limit, DiscoveryError};
 use skel::{
-    compute_stats, discover_files, estimate_tokens, format_markdown, format_terminal_report,
-    skeletonize, FileResult,
+    compute_stats, estimate_tokens, format_markdown, format_terminal_report, skeletonize,
+    FileResult,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -33,10 +34,21 @@ struct Args {
     /// Print statistics summary only
     #[arg(short, long)]
     stats: bool,
+
+    /// Serve read-only MCP tools over stdin/stdout, scoped to the target directory
+    #[arg(long, conflicts_with_all = ["focus", "output", "stats"])]
+    mcp: bool,
 }
 
 fn main() {
     let args = Args::parse();
+    if args.mcp {
+        if let Err(err) = skel::mcp::serve(&args.path) {
+            eprintln!("MCP server error: {err}");
+            process::exit(1);
+        }
+        return;
+    }
     let root = match args.path.canonicalize() {
         Ok(p) => p,
         Err(_) => {
@@ -49,10 +61,22 @@ fn main() {
         }
     };
 
-    let discovered = discover_files(&root, &args.focus).unwrap_or_else(|err| {
-        eprintln!("Error: Invalid --focus pattern: {err}");
-        process::exit(2);
-    });
+    let discovery =
+        discover_files_with_limit(&root, &args.focus, usize::MAX).unwrap_or_else(|err| {
+            if let DiscoveryError::InvalidFocus(err) = err {
+                eprintln!("Error: Invalid --focus pattern: {err}");
+                process::exit(2);
+            }
+            eprintln!("Error: {err}");
+            process::exit(1);
+        });
+    for warning in &discovery.warnings {
+        eprintln!("Warning: {warning}");
+    }
+    if discovery.files.is_empty() && !discovery.warnings.is_empty() {
+        process::exit(1);
+    }
+    let discovered = discovery.files;
     if discovered.is_empty() {
         println!("No supported source files found in target directory.");
         return;

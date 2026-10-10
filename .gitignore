@@ -9,3 +9,6 @@
 
 # Output context files
 /context.md
+
+# Temp files
+/temp/

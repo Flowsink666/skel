@@ -1,3 +1,4 @@
+use crate::skeletonizer::walk_prunable;
 use tree_sitter::{Node, Parser};
 
 /// Prune implementation bodies in Python AST while retaining
@@ -18,7 +19,9 @@ pub fn skeletonize_python(source: &str) -> String {
     }
 
     let mut ranges = Vec::new();
-    collect_py_prune_ranges(tree.root_node(), source, &mut ranges);
+    if !collect_py_prune_ranges(tree.root_node(), source, &mut ranges) {
+        return source.to_string();
+    }
 
     ranges.sort_by_key(|&(start, _, _)| start);
 
@@ -37,12 +40,89 @@ pub fn skeletonize_python(source: &str) -> String {
     result
 }
 
-fn collect_py_prune_ranges(node: Node, source: &str, ranges: &mut Vec<(usize, usize, String)>) {
-    let kind = node.kind();
-    if kind == "function_definition" || kind == "async_function_definition" {
-        if let Some(block) = node.child_by_field_name("body") {
+fn is_valid_docstring_stmt(stmt: Node, source: &str) -> bool {
+    if stmt.kind() != "expression_statement" {
+        return false;
+    }
+    let mut expr = match stmt.child(0) {
+        Some(c) => c,
+        None => return false,
+    };
+    while expr.kind() == "parenthesized_expression" {
+        if let Some(inner) = expr.named_child(0) {
+            expr = inner;
+        } else {
+            return false;
+        }
+    }
+    is_valid_docstring_expr(expr, source)
+}
+
+fn is_valid_docstring_expr(expr: Node, source: &str) -> bool {
+    match expr.kind() {
+        "string" => is_valid_docstring_string_literal(expr, source),
+        "concatenated_string" => {
+            let mut cursor = expr.walk();
+            let mut count = 0;
+            for child in expr.children(&mut cursor) {
+                if child.kind() == "comment" {
+                    continue;
+                }
+                if child.kind() == "string" {
+                    if !is_valid_docstring_string_literal(child, source) {
+                        return false;
+                    }
+                    count += 1;
+                } else {
+                    return false;
+                }
+            }
+            count > 0
+        }
+        _ => false,
+    }
+}
+
+fn is_valid_docstring_string_literal(node: Node, source: &str) -> bool {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "interpolation" {
+            return false;
+        }
+        if child.kind() == "string_start" {
+            let text = &source[child.byte_range()];
+            let prefix: String = text.chars().take_while(|c| c.is_alphabetic()).collect();
+            let prefix_lower = prefix.to_ascii_lowercase();
+            if prefix_lower.contains('b') || prefix_lower.contains('f') {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn collect_py_prune_ranges(
+    node: Node,
+    source: &str,
+    ranges: &mut Vec<(usize, usize, String)>,
+) -> bool {
+    let mut valid = true;
+    walk_prunable(node, |node| {
+        let kind = node.kind();
+        if kind == "function_definition" || kind == "async_function_definition" {
+            let block = match node.child_by_field_name("body") {
+                Some(b) => b,
+                None => {
+                    valid = false;
+                    return false;
+                }
+            };
             let mut cursor = block.walk();
             let children: Vec<Node> = block.children(&mut cursor).collect();
+            if children.is_empty() || children.iter().all(|c| c.kind() == "comment") {
+                valid = false;
+                return false;
+            }
 
             // Preserve actual tabs/spaces; a byte column is not an indentation width.
             let line_start = source[..block.start_byte()]
@@ -56,13 +136,8 @@ fn collect_py_prune_ranges(node: Node, source: &str, ranges: &mut Vec<(usize, us
                 if child.kind() == "comment" {
                     continue;
                 }
-                if child.kind() == "expression_statement" {
-                    if let Some(str_child) = child.child(0) {
-                        if str_child.kind() == "string" {
-                            docstring_node = Some(*child);
-                            break;
-                        }
-                    }
+                if is_valid_docstring_stmt(*child, source) {
+                    docstring_node = Some(*child);
                 }
                 break;
             }
@@ -84,14 +159,29 @@ fn collect_py_prune_ranges(node: Node, source: &str, ranges: &mut Vec<(usize, us
                 let replacement = "...".to_string();
                 ranges.push((prune_start, prune_end, replacement));
             }
-            return; // Do not recurse into pruned function body
+            return false; // Do not descend into a pruned function body.
         }
-    }
 
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_py_prune_ranges(child, source, ranges);
-    }
+        if kind == "class_definition" {
+            let block = match node.child_by_field_name("body") {
+                Some(b) => b,
+                None => {
+                    valid = false;
+                    return false;
+                }
+            };
+            let mut cursor = block.walk();
+            let children: Vec<Node> = block.children(&mut cursor).collect();
+            if children.is_empty() || children.iter().all(|c| c.kind() == "comment") {
+                valid = false;
+                return false;
+            }
+        }
+
+        true
+    });
+
+    valid
 }
 
 #[cfg(test)]

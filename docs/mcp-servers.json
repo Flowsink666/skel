@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "skel": {
+      "command": "skel",
+      "args": ["/absolute/path/to/project", "--mcp"]
+    }
+  }
+}
